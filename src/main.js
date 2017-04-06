@@ -1,7 +1,7 @@
 'use babel'
 
 // eslint-disable-next-line import/no-extraneous-dependencies, import/extensions
-import { CompositeDisposable } from 'atom'
+import { CompositeDisposable, Task } from 'atom'
 
 // Dependencies
 let path
@@ -32,19 +32,8 @@ module.exports = {
     this.active = true
     this.worker = null
     const initializeWorker = () => {
-      if (!helpers) {
-        helpers = require('./helpers')
-      }
-      const { worker, subscription } = helpers.spawnWorker()
-      this.worker = worker
-      this.subscriptions.add(subscription)
-      worker.onDidExit(() => {
-        if (this.active) {
-          helpers.showError('Worker died unexpectedly', 'Check your console for more ' +
-          'info. A new worker will be spawned instantly.')
-          setTimeout(initializeWorker, 1000)
-        }
-      })
+      this.worker = Task.once(require.resolve('./worker.js'))
+      this.worker.on('linter-eslint:response', this.handleResponse)
     }
 
     this.subscriptions.add(
@@ -57,8 +46,8 @@ module.exports = {
     )
 
     const embeddedScope = 'source.js.embedded.html'
-    this.subscriptions.add(
-      atom.config.observe('linter-eslint.lintHtmlFiles', (lintHtmlFiles) => {
+    this.subscriptions.add(atom.config.observe('linter-eslint.lintHtmlFiles',
+      (lintHtmlFiles) => {
         if (lintHtmlFiles) {
           scopes.push(embeddedScope)
         } else if (scopes.indexOf(embeddedScope) !== -1) {
@@ -172,14 +161,14 @@ module.exports = {
       }
     }))
 
-    this.subscriptions.add(
-      atom.config.observe('linter-eslint.showRuleIdInMessage', (value) => {
+    this.subscriptions.add(atom.config.observe('linter-eslint.showRuleIdInMessage',
+      (value) => {
         showRule = value
       })
     )
 
-    this.subscriptions.add(
-      atom.config.observe('linter-eslint.disableWhenNoEslintConfig', (value) => {
+    this.subscriptions.add(atom.config.observe('linter-eslint.disableWhenNoEslintConfig',
+      (value) => {
         disableWhenNoEslintConfig = value
       })
     )
@@ -195,6 +184,10 @@ module.exports = {
     window.requestIdleCallback(initializeWorker)
   },
   deactivate() {
+    if (this.worker !== null) {
+      this.worker.terminate()
+      this.worker = null
+    }
     this.active = false
     this.subscriptions.dispose()
   },
@@ -222,7 +215,7 @@ module.exports = {
           return []
         }
 
-        return this.worker.request('job', {
+        this.worker.send('linter-eslint:job', {
           type: 'lint',
           contents: text,
           config: atom.config.get('linter-eslint'),
@@ -246,5 +239,13 @@ module.exports = {
         })
       }
     }
+  },
+  async sendJob(config) {
+    return new Promise((resolve) => {
+      this.worker
+    });
+  },
+  handleResponse(response) {
+
   }
 }

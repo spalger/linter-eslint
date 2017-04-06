@@ -1,9 +1,8 @@
 'use babel'
 
-// Note: 'use babel' doesn't work in forked processes
+/* global emit */
 
 import Path from 'path'
-import { create } from 'process-communication'
 import { FindCache, findCached } from 'atom-linter'
 import * as Helpers from './worker-helpers'
 import isConfigAtHomeRoot from './is-config-at-home-root'
@@ -47,7 +46,10 @@ function fixJob({ cliEngineOptions, eslint, filePath }) {
   return 'Linter-ESLint: Fix attempt complete, but linting errors remain.'
 }
 
-create().onRequest('job', ({ contents, type, config, filePath, projectPath, rules }, job) => {
+export default async function ({ contents, type, config, filePath, projectPath, rules }) {
+  // Tell Atom not to immediately terminate the task
+  this.async()
+
   if (config.disableFSCache) {
     FindCache.clear()
   }
@@ -62,15 +64,25 @@ create().onRequest('job', ({ contents, type, config, filePath, projectPath, rule
   )
 
   const noProjectConfig = (configPath === null || isConfigAtHomeRoot(configPath))
+  let response
   if (noProjectConfig && config.disableWhenNoEslintConfig) {
-    job.response = []
+    response = []
+    emit('linter-eslint:response', [])
   } else if (type === 'lint') {
     const report = lintJob({ cliEngineOptions, contents, eslint, filePath })
-    job.response = report.results.length ? report.results[0].messages.filter(shouldBeReported) : []
+    response = report.results.length ? report.results[0].messages.filter(shouldBeReported) : []
   } else if (type === 'fix') {
-    job.response = fixJob({ cliEngineOptions, eslint, filePath })
+    response = fixJob({ cliEngineOptions, eslint, filePath })
   } else if (type === 'debug') {
     const modulesDir = Path.dirname(findCached(fileDir, 'node_modules/eslint') || '')
-    job.response = Helpers.findESLintDirectory(modulesDir, config)
+    response = Helpers.findESLintDirectory(modulesDir, config)
   }
-})
+  emit('linter-eslint:response', response)
+
+  // FIXME: Necessary here?
+  // Handle requests to terminate the process
+  process.on('SIGTERM', () => {
+    // Do something?
+    process.exit(0)
+  })
+}
