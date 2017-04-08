@@ -4,8 +4,9 @@ import * as path from 'path'
 import * as fs from 'fs'
 import { tmpdir } from 'os'
 import rimraf from 'rimraf'
-import { beforeEach, it } from 'jasmine-fix'
-import linter from '../lib/main'
+import { beforeEach, it, wait, fit } from 'jasmine-fix'
+// NOTE: If using fit you must add it to the list above!
+import linterEslint from '../lib/main'
 
 const fixturesDir = path.join(__dirname, 'fixtures')
 
@@ -30,34 +31,32 @@ function copyFileToTempDir(fileToCopyPath) {
   return new Promise((resolve) => {
     const tempFixtureDir = fs.mkdtempSync(tmpdir() + path.sep)
     const tempFixturePath = path.join(tempFixtureDir, path.basename(fileToCopyPath))
-    const wr = fs.createWriteStream(tempFixturePath)
-    wr.on('close', () =>
+    const ws = fs.createWriteStream(tempFixturePath)
+    ws.on('close', () =>
       atom.workspace.open(tempFixturePath).then((openEditor) => {
         resolve({ openEditor, tempDir: tempFixtureDir })
       })
     )
-    fs.createReadStream(fileToCopyPath).pipe(wr)
+    fs.createReadStream(fileToCopyPath).pipe(ws)
+  })
+}
+
+async function getNotification() {
+  return new Promise((resolve) => {
+    let notificationSub
+    const newNotification = (notification) => {
+      // Dispose of the notificaiton subscription
+      notificationSub.dispose()
+      resolve(notification)
+    }
+    // Subscribe to Atom's notifications
+    notificationSub = atom.notifications.onDidAddNotification(newNotification)
   })
 }
 
 describe('The eslint provider for Linter', () => {
-  const { spawnWorker } = require('../lib/helpers')
-
-  const worker = spawnWorker()
-  const lint = linter.provideLinter.call(worker).lint
-  const fix = (textEditor) => {
-    const ignoredRules = atom.config.get('linter-eslint.rulesToDisableWhileFixing')
-      .reduce((ids, id) => {
-        ids[id] = 0 // 0 is the severity to turn off a rule
-        return ids
-      }, {})
-    return worker.worker.request('job', {
-      type: 'fix',
-      rules: ignoredRules,
-      config: atom.config.get('linter-eslint'),
-      filePath: textEditor.getPath()
-    })
-  }
+  const linterProvider = linterEslint.provideLinter()
+  const lint = linterProvider.lint
 
   beforeEach(async () => {
     atom.config.set('linter-eslint.disableFSCache', false)
@@ -67,7 +66,6 @@ describe('The eslint provider for Linter', () => {
     await atom.packages.activatePackage('language-javascript')
     // Activate the provider
     await atom.packages.activatePackage('linter-eslint')
-    await atom.workspace.open(goodPath)
   })
 
   describe('checks bad.js and', () => {
@@ -77,13 +75,10 @@ describe('The eslint provider for Linter', () => {
       editor = openEditor
     })
 
-    it('finds at least one message', async () => {
+    it('verifies the messages', async () => {
       const messages = await lint(editor)
-      expect(messages.length).toBeGreaterThan(0)
-    })
+      expect(messages.length).toBe(2)
 
-    it('verifies that message', async () => {
-      const messages = await lint(editor)
       const expected = '&#39;foo&#39; is not defined. ' +
         '(<a href="http://eslint.org/docs/rules/no-undef">no-undef</a>)'
       expect(messages[0].type).toBe('Error')
@@ -91,7 +86,17 @@ describe('The eslint provider for Linter', () => {
       expect(messages[0].html).toBe(expected)
       expect(messages[0].filePath).toBe(badPath)
       expect(messages[0].range).toEqual([[0, 0], [0, 3]])
-      expect(Object.hasOwnProperty.call(messages[0], 'fix')).toBeFalsy()
+      expect(messages[0].fix).not.toBeDefined()
+
+      expect(messages[1].type).toBe('Error')
+      expect(messages[1].text).not.toBeDefined()
+      expect(messages[1].html).toBe('Extra semicolon. ' +
+        '(<a href="http://eslint.org/docs/rules/semi">semi</a>)')
+      expect(messages[1].filePath).toBe(badPath)
+      expect(messages[1].range).toEqual([[0, 8], [0, 9]])
+      expect(messages[1].fix).toBeDefined()
+      expect(messages[1].fix.range).toEqual([[0, 6], [0, 9]])
+      expect(messages[1].fix.newText).toBe('42')
     })
   })
 
@@ -153,23 +158,35 @@ describe('The eslint provider for Linter', () => {
 
     it('will not give warnings when autofixing the file', async () => {
       const editor = await atom.workspace.open(ignoredPath)
-      const result = await fix(editor)
-      expect(result).toBe('Linter-ESLint: Fix complete.')
+      const foo = {
+        checkNotificaton(notification) {
+          console.log(notification)
+        }
+      }
+      spyOn(linterEslint, 'fixJob').andCallThrough()
+      spyOn(foo, 'checkNotificaton').andCallThrough()
+      const notifSub = atom.notifications.onDidAddNotification(foo.checkNotificaton)
+      atom.commands.dispatch(atom.views.getView(editor), 'linter-eslint:fix-file')
+      // Wait 500 ms for the fix to run
+      await wait(500)
+      expect(linterEslint.fixJob).toHaveBeenCalled()
+      expect(foo.checkNotificaton).not.toHaveBeenCalled()
+      notifSub.dispose()
     })
   })
 
-  describe('fixes errors', () => {
+  fdescribe('fixes errors', () => {
     let editor
-    let doneCheckingFixes
     let tempFixtureDir
 
     beforeEach(async () => {
-      doneCheckingFixes = false
+      // Copy the file to a temporary folder
       const { openEditor, tempDir } = await copyFileToTempDir(fixPath)
       editor = openEditor
       tempFixtureDir = tempDir
+      // Copy the config to the same temporary directory
       return new Promise((resolve) => {
-        const configWritePath = path.join(tempFixtureDir, path.basename(configPath))
+        const configWritePath = path.join(tempDir, path.basename(configPath))
         const wr = fs.createWriteStream(configWritePath)
         wr.on('close', () => resolve())
         fs.createReadStream(configPath).pipe(wr)
@@ -177,6 +194,7 @@ describe('The eslint provider for Linter', () => {
     })
 
     afterEach(() => {
+      // Remove the temporary directory
       rimraf.sync(tempFixtureDir)
     })
 
@@ -187,55 +205,53 @@ describe('The eslint provider for Linter', () => {
     }
 
     async function makeFixes(textEditor) {
-      const messagesAfterSave = await fix(textEditor)
-      // Linter reports a successful fix
-      expect(messagesAfterSave).toBe('Linter-ESLint: Fix complete.')
+      return new Promise(async (resolve) => {
+        // Subscribe to the file reload event
+        const editorReloadSub = textEditor.getBuffer().onDidReload(async () => {
+          console.log('onDidReload')
+          console.log(textEditor.getText())
+          editorReloadSub.dispose()
+          // File has been reloaded in Atom, notification checking will happen
+          // async either way, but should already be finished at this point
+          resolve()
+        })
+
+        // Now that all the required subscriptions are active, send off a fix request
+        atom.commands.dispatch(atom.views.getView(textEditor), 'linter-eslint:fix-file')
+        const notification = await getNotification()
+        expect(notification.getMessage()).toBe('Linter-ESLint: Fix complete.')
+        expect(notification.getType()).toBe('success')
+      })
     }
 
     it('should fix linting errors', async () => {
-      // Create a subscription to watch when the editor changes (from the fix)
-      editor.onDidChange(async () => {
-        const messagesAfterFixing = await lint(editor)
-        // Note: this fires several times, with only the final time resulting in
-        // a non-null messagesAfterFixing.  This is the reason for the check here
-        // and for the `waitsFor` which makes sure the expectation is tested.
-        if (messagesAfterFixing) {
-          // After opening the file again, there are no linting errors
-          expect(messagesAfterFixing.length).toBe(0)
-          doneCheckingFixes = true
-        }
+      // atom.config.set('linter-eslint.rulesToDisableWhileFixing', ['semi'])
+      const editorChangeSub = editor.onDidChange(() => {
+        console.log('onDidChange')
+        console.log(editor.getText())
       })
-
       await firstLint(editor)
       await makeFixes(editor)
-      waitsFor(
-        () => doneCheckingFixes,
-        'Messages should be checked after fixing'
-      )
+      const messagesAfterFixing = await lint(editor)
+      expect(messagesAfterFixing.length).toBe(0)
+      editorChangeSub.dispose()
     })
 
-    xit('should not fix linting errors for rules that are disabled with rulesToDisableWhileFixing', async () => {
+    it('should not fix linting errors for rules that are disabled with rulesToDisableWhileFixing', async () => {
       atom.config.set('linter-eslint.rulesToDisableWhileFixing', ['semi'])
-      // Create a subscription to watch when the editor changes (from the fix)
-      editor.onDidChange(async () => {
-        const messagesAfterFixing = await lint(editor)
-        // Note: this fires several times, with only the final time resulting in
-        // a non-null messagesAfterFixing.  This is the reason for the check here
-        // and for the `waitsFor` which makes sure the expectation is tested.
-        if (messagesAfterFixing) {
-          // There is still one linting error, `semi` which was disabled during fixing
-          expect(messagesAfterFixing.length).toBe(1)
-          expect(messagesAfterFixing[0].html).toBe('Extra semicolon. (<a href="http://eslint.org/docs/rules/semi">semi</a>)')
-          doneCheckingFixes = true
-        }
+
+      const editorChangeSub = editor.onDidChange(() => {
+        console.log('onDidChange')
+        console.log(editor.getText())
       })
 
       await firstLint(editor)
       await makeFixes(editor)
-      waitsFor(
-        () => doneCheckingFixes,
-        'Messages should be checked after fixing'
-      )
+      await wait(100)
+      const messagesAfterFixing = await lint(editor)
+      expect(messagesAfterFixing.length).toBe(1)
+      expect(messagesAfterFixing[0].html).toBe('Extra semicolon. (<a href="http://eslint.org/docs/rules/semi">semi</a>)')
+      editorChangeSub.dispose()
     })
   })
 
@@ -301,47 +317,23 @@ describe('The eslint provider for Linter', () => {
       editor = openEditor
     })
 
-    it('shows an info notification', () => {
-      let done
-      const checkNotificaton = (notification) => {
-        if (notification.getMessage() === 'linter-eslint debugging information') {
-          expect(notification.getType()).toEqual('info')
-          done = true
-        }
-      }
-      atom.notifications.onDidAddNotification(checkNotificaton)
-
+    it('shows an info notification', async () => {
       atom.commands.dispatch(atom.views.getView(editor), 'linter-eslint:debug')
+      const notification = await getNotification()
 
-      waitsFor(
-        () => done,
-        'Notification type should be checked',
-        2000
-      )
+      expect(notification.getMessage()).toBe('linter-eslint debugging information')
+      expect(notification.getType()).toEqual('info')
     })
 
-    it('includes debugging information in the details', () => {
-      let done
-      const checkNotificaton = (notification) => {
-        if (notification.getMessage() === 'linter-eslint debugging information') {
-          const detail = notification.getDetail()
-          expect(detail.includes(`Atom version: ${atom.getVersion()}`)).toBe(true)
-          expect(detail.includes('linter-eslint version:')).toBe(true)
-          expect(detail.includes(`Platform: ${process.platform}`)).toBe(true)
-          expect(detail.includes('linter-eslint configuration:')).toBe(true)
-          expect(detail.includes('Using local project ESLint')).toBe(true)
-          done = true
-        }
-      }
-      atom.notifications.onDidAddNotification(checkNotificaton)
-
+    it('includes debugging information in the details', async () => {
       atom.commands.dispatch(atom.views.getView(editor), 'linter-eslint:debug')
-
-      waitsFor(
-        () => done,
-        'Notification details should be checked',
-        2000
-      )
+      const notification = await getNotification()
+      const detail = notification.getDetail()
+      expect(detail.includes(`Atom version: ${atom.getVersion()}`)).toBe(true)
+      expect(detail.includes('linter-eslint version:')).toBe(true)
+      expect(detail.includes(`Platform: ${process.platform}`)).toBe(true)
+      expect(detail.includes('linter-eslint configuration:')).toBe(true)
+      expect(detail.includes('Using local project ESLint')).toBe(true)
     })
   })
 
@@ -366,7 +358,7 @@ describe('The eslint provider for Linter', () => {
     beforeEach(async () => {
       atom.config.set('linter-eslint.disableWhenNoEslintConfig', false)
 
-      const { openEditor, tempDir } = copyFileToTempDir(badInlinePath, tempFixtureDir)
+      const { openEditor, tempDir } = await copyFileToTempDir(badInlinePath)
       editor = openEditor
       tempFixtureDir = tempDir
     })
@@ -405,7 +397,7 @@ describe('The eslint provider for Linter', () => {
     beforeEach(async () => {
       atom.config.set('linter-eslint.disableWhenNoEslintConfig', true)
 
-      const { openEditor, tempDir } = copyFileToTempDir(badInlinePath)
+      const { openEditor, tempDir } = await copyFileToTempDir(badInlinePath)
       editor = openEditor
       tempFixtureDir = tempDir
     })

@@ -37,6 +37,7 @@ function lintJob({ cliEngineOptions, contents, eslint, filePath }) {
 
 function fixJob({ cliEngineOptions, eslint, filePath }) {
   const report = lintJob({ cliEngineOptions, eslint, filePath })
+  // console.log('fix lint report', report)
 
   eslint.CLIEngine.outputFixes(report)
 
@@ -46,43 +47,43 @@ function fixJob({ cliEngineOptions, eslint, filePath }) {
   return 'Linter-ESLint: Fix attempt complete, but linting errors remain.'
 }
 
-export default async function ({ contents, type, config, filePath, projectPath, rules }) {
-  // Tell Atom not to immediately terminate the task
-  this.async()
+// export default async function () {
+module.exports = async function asdf() {
+  console.log('worker started')
+  process.on('message', (jobConfig) => {
+    console.log('worker config', jobConfig)
+    const { contents, type, config, filePath, projectPath, rules, emitKey } = jobConfig
+    if (config.disableFSCache) {
+      FindCache.clear()
+    }
 
-  if (config.disableFSCache) {
-    FindCache.clear()
-  }
+    const fileDir = Path.dirname(filePath)
+    const eslint = Helpers.getESLintInstance(fileDir, config, projectPath)
+    const configPath = Helpers.getConfigPath(fileDir)
+    const noProjectConfig = (configPath === null || isConfigAtHomeRoot(configPath))
+    if (noProjectConfig && config.disableWhenNoEslintConfig) {
+      console.log('worker disable no config')
+      emit(emitKey, [])
+      return
+    }
 
-  const fileDir = Path.dirname(filePath)
-  const eslint = Helpers.getESLintInstance(fileDir, config, projectPath)
-  const configPath = Helpers.getConfigPath(fileDir)
-  const relativeFilePath = Helpers.getRelativePath(fileDir, filePath, config)
+    const relativeFilePath = Helpers.getRelativePath(fileDir, filePath, config)
 
-  const cliEngineOptions = Helpers.getCLIEngineOptions(
-    type, config, rules, relativeFilePath, fileDir, configPath
-  )
+    const cliEngineOptions = Helpers.getCLIEngineOptions(
+      type, config, rules, relativeFilePath, fileDir, configPath
+    )
 
-  const noProjectConfig = (configPath === null || isConfigAtHomeRoot(configPath))
-  let response
-  if (noProjectConfig && config.disableWhenNoEslintConfig) {
-    response = []
-    emit('linter-eslint:response', [])
-  } else if (type === 'lint') {
-    const report = lintJob({ cliEngineOptions, contents, eslint, filePath })
-    response = report.results.length ? report.results[0].messages.filter(shouldBeReported) : []
-  } else if (type === 'fix') {
-    response = fixJob({ cliEngineOptions, eslint, filePath })
-  } else if (type === 'debug') {
-    const modulesDir = Path.dirname(findCached(fileDir, 'node_modules/eslint') || '')
-    response = Helpers.findESLintDirectory(modulesDir, config)
-  }
-  emit('linter-eslint:response', response)
-
-  // FIXME: Necessary here?
-  // Handle requests to terminate the process
-  process.on('SIGTERM', () => {
-    // Do something?
-    process.exit(0)
+    let response
+    if (type === 'lint') {
+      const report = lintJob({ cliEngineOptions, contents, eslint, filePath })
+      response = report.results.length ? report.results[0].messages.filter(shouldBeReported) : []
+    } else if (type === 'fix') {
+      response = fixJob({ cliEngineOptions, eslint, filePath })
+    } else if (type === 'debug') {
+      const modulesDir = Path.dirname(findCached(fileDir, 'node_modules/eslint') || '')
+      response = Helpers.findESLintDirectory(modulesDir, config)
+    }
+    console.log('worker response', response)
+    emit(emitKey, response)
   })
 }
